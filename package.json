@@ -1,0 +1,15 @@
+{
+  "name": "finwise-proxy",
+  "version": "3.0.0",
+  "description": "FinWise proxy — Twelve Data + yahoo-finance2 + Marketaux",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "yahoo-finance2": "^2.13.3"
+  },
+  "engines": { "node": ">=18" }
+}
