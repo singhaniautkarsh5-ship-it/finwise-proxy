@@ -153,28 +153,55 @@ async function yahooHistorical(symbol, from, to) {
   } catch(e) { return []; }
 }
 
-// ── Yahoo Finance profile ─────────────────────────────────────
+// ── Yahoo Finance profile — full financials + ratios ─────────
 async function yahooProfile(symbol) {
-  const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=assetProfile,price,financialData,defaultKeyStatistics`;
+  // Request all useful modules in one call
+  const modules = 'assetProfile,summaryProfile,price,financialData,defaultKeyStatistics,summaryDetail';
+  const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=${modules}`;
   try {
     const { body } = await fetchJSON(url, { 'Cookie': 'GUC=xxx' });
     const r = body?.quoteSummary?.result?.[0];
     if (!r) return null;
-    const p = r.assetProfile || {}, pr = r.price || {}, fd = r.financialData || {}, ks = r.defaultKeyStatistics || {};
+    const p  = r.assetProfile    || {};
+    const sp = r.summaryProfile  || {};
+    const pr = r.price            || {};
+    const fd = r.financialData    || {};
+    const ks = r.defaultKeyStatistics || {};
+    const sd = r.summaryDetail    || {};
+
+    // Helper: safely extract .raw value
+    const raw = v => (v?.raw !== undefined ? v.raw : (typeof v === 'number' ? v : null));
+
     return {
-      symbol, name: pr.shortName || pr.longName || symbol,
-      description: p.longBusinessSummary || '',
-      sector: p.sector || '', industry: p.industry || '',
-      hq: [p.city, p.state, p.country].filter(Boolean).join(', '),
-      employees: p.fullTimeEmployees || null,
-      website: p.website || '', exchange: pr.exchangeName || '',
-      marketCap: pr.marketCap?.raw, revenue: fd.totalRevenue?.raw,
-      pe: ks.trailingPE?.raw, pb: ks.priceToBook?.raw,
-      roe: fd.returnOnEquity?.raw, de: fd.debtToEquity?.raw,
-      grossMargin: fd.grossMargins?.raw, currentRatio: fd.currentRatio?.raw,
-      eps: ks.trailingEps?.raw,
+      symbol,
+      name:         pr.shortName || pr.longName || symbol,
+      description:  p.longBusinessSummary || sp.longBusinessSummary || '',
+      sector:       p.sector    || sp.sector    || '',
+      industry:     p.industry  || sp.industry  || '',
+      hq:           [p.city || sp.city, p.state || sp.state, p.country || sp.country].filter(Boolean).join(', '),
+      employees:    raw(p.fullTimeEmployees) || raw(sp.fullTimeEmployees) || null,
+      website:      p.website   || sp.website   || '',
+      exchange:     pr.exchangeName || '',
+      marketCap:    raw(pr.marketCap)         || raw(sd.marketCap),
+      revenue:      raw(fd.totalRevenue),
+      // Ratios — all sourced from Yahoo Finance, fully free
+      pe:           raw(ks.trailingPE)         || raw(sd.trailingPE),
+      pb:           raw(ks.priceToBook),
+      roe:          raw(fd.returnOnEquity),
+      de:           raw(fd.debtToEquity),
+      grossMargin:  raw(fd.grossMargins),
+      currentRatio: raw(fd.currentRatio),
+      eps:          raw(ks.trailingEps),
+      // Extra stats for display
+      forwardPE:    raw(ks.forwardPE),
+      dividendYield:raw(sd.dividendYield)      || raw(sd.trailingAnnualDividendYield),
+      beta:         raw(sd.beta)               || raw(ks.beta),
+      fiftyTwoWeekHigh: raw(sd.fiftyTwoWeekHigh),
+      fiftyTwoWeekLow:  raw(sd.fiftyTwoWeekLow),
+      profitMargin: raw(fd.profitMargins),
+      revenueGrowth:raw(fd.revenueGrowth),
     };
-  } catch(e) { return null; }
+  } catch(e) { console.error('yahooProfile error:', symbol, e.message); return null; }
 }
 
 // ── Yahoo Finance search ──────────────────────────────────────
@@ -236,38 +263,14 @@ const server = http.createServer(async (req, res) => {
   }
 
   // /profile?symbol=AAPL
+  // Always uses Yahoo Finance — free, global, has all ratios
   if (path === '/profile') {
     const symbol = q.symbol || '';
     if (!symbol) { json({ error: 'symbol required' }, 400); return; }
-    // Try Twelve Data profile for US stocks
-    if (getMarket(symbol) === 'US') {
-      try {
-        const tdUrl = `https://api.twelvedata.com/profile?symbol=${encodeURIComponent(symbol)}&apikey=${TD_KEY}`;
-        const { body: profile } = await fetchJSON(tdUrl);
-        const statsUrl = `https://api.twelvedata.com/statistics?symbol=${encodeURIComponent(symbol)}&apikey=${TD_KEY}`;
-        const { body: stats } = await fetchJSON(statsUrl);
-        if (profile && !profile.code) {
-          const s = stats?.statistics || {};
-          json({
-            symbol, name: profile.name || symbol,
-            description: profile.description || '',
-            sector: profile.sector || '', industry: profile.industry || '',
-            hq: [profile.address, profile.city, profile.country].filter(Boolean).join(', '),
-            employees: profile.employees || null, website: profile.website || '',
-            exchange: profile.exchange || '',
-            marketCap:    s.valuations_metrics?.market_capitalization,
-            pe:           parseFloat(s.valuations_metrics?.trailing_pe) || null,
-            pb:           parseFloat(s.valuations_metrics?.price_to_book_mrq) || null,
-            eps:          parseFloat(s.valuations_metrics?.earnings_per_share_basic_ttm) || null,
-          });
-          return;
-        }
-      } catch(e) {}
-    }
-    // Yahoo Finance for all global stocks
     const profile = await yahooProfile(symbol);
     if (profile) { json(profile); return; }
-    json({ symbol, name: symbol, description: '', sector: '', industry: '' }); return;
+    json({ symbol, name: symbol, description: 'Data unavailable', sector: '', industry: '' });
+    return;
   }
 
   // /search?query=reliance
