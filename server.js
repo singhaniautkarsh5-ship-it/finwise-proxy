@@ -12,7 +12,7 @@ const ALLOWED       = process.env.ALLOWED_ORIGIN || '*';
 
 // yahoo-finance2 v2 exports differently depending on bundler —
 // handle both named and default export patterns
-const yahooFinance = yfModule.default ?? yfModule;
+const yahooFinance = yfModule.default?.default ?? yfModule.default ?? yfModule;
 
 function cors(origin) {
   return {
@@ -65,9 +65,12 @@ const server = http.createServer(async (req, res) => {
   };
 
   if (path === '/health') {
+    const d = yfModule.default;
     json({
-      ok: true, version: '3.3',
-      yfKeys: Object.keys(yfModule).slice(0, 8),
+      ok: true, version: '3.4',
+      moduleKeys: Object.keys(yfModule),
+      defaultKeys: d ? Object.keys(d).slice(0, 8) : null,
+      defaultDefaultKeys: d?.default ? Object.keys(d.default).slice(0, 8) : null,
       hasQuote: typeof yahooFinance.quote,
       hasSummary: typeof yahooFinance.quoteSummary,
     });
