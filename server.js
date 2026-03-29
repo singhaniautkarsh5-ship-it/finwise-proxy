@@ -6,10 +6,13 @@ import WebSocket from 'ws';
 
 const PORT          = process.env.PORT           || 3001;
 const TD_KEY        = process.env.TD_KEY         || 'be5cb92f2c744ed98fd46f787a62088d';
+const FMP_KEY       = process.env.FMP_KEY        || '0QaZFReu3rNLGWHlfuYwehPHOX99PfC0';
 const MARKETAUX_KEY = process.env.MARKETAUX_KEY  || '';
 const ALLOWED       = process.env.ALLOWED_ORIGIN || '*';
 
-// ── CORS ─────────────────────────────────────────────────────
+const FMP = 'https://financialmodelingprep.com/api/v3';
+const TD  = 'https://api.twelvedata.com';
+
 function cors(origin) {
   return {
     'Access-Control-Allow-Origin':  ALLOWED === '*' ? (origin || '*') : ALLOWED,
@@ -19,27 +22,19 @@ function cors(origin) {
   };
 }
 
-// ── HTTPS GET with full browser-like headers ─────────────────
 function get(url) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = https.get({
       hostname: u.hostname,
       path:     u.pathname + u.search,
-      headers: {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept':          'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'identity',
-        'Referer':         'https://finance.yahoo.com/',
-        'Origin':          'https://finance.yahoo.com',
-      },
+      headers:  { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
     }, res => {
       let body = '';
       res.on('data', d => body += d);
       res.on('end', () => {
-        try { resolve({ status: res.statusCode, headers: res.headers, body: JSON.parse(body) }); }
-        catch(e) { resolve({ status: res.statusCode, headers: res.headers, body: null, raw: body.slice(0,200) }); }
+        try { resolve({ status: res.statusCode, body: JSON.parse(body) }); }
+        catch(e) { resolve({ status: res.statusCode, body: null }); }
       });
     });
     req.on('error', reject);
@@ -58,45 +53,32 @@ function getMarket(s) {
   return 'US';
 }
 
-// ── Yahoo Finance v8 quote (works server-side) ───────────────
-async function yfQuote(symbols) {
-  const syms = Array.isArray(symbols) ? symbols : [symbols];
-  const url = `https://query1.finance.yahoo.com/v8/finance/quote?symbols=${encodeURIComponent(syms.join(','))}&fields=regularMarketPrice,regularMarketChangePercent,regularMarketChange,regularMarketOpen,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose,shortName,longName,fullExchangeName,sector,marketCap`;
-  const { body } = await get(url);
-  return body?.quoteResponse?.result || [];
+// FMP quote — works for US stocks, server-side no CORS issue
+async function fmpQuote(symbols) {
+  const { body } = await get(`${FMP}/quote/${symbols.join(',')}?apikey=${FMP_KEY}`);
+  if (!Array.isArray(body)) return [];
+  return body.filter(d => d?.price > 0).map(d => ({
+    symbol: d.symbol, price: d.price,
+    changesPercentage: d.changesPercentage, change: d.change,
+    open: d.open, dayHigh: d.dayHigh, dayLow: d.dayLow,
+    previousClose: d.previousClose, name: d.name || d.symbol,
+    exchange: d.exchange || '', marketCap: d.marketCap,
+  }));
 }
 
-// ── Yahoo Finance quoteSummary (profile + ratios) ────────────
-async function yfSummary(symbol) {
-  const modules = 'assetProfile,summaryDetail,price,financialData,defaultKeyStatistics';
-  const url = `https://query1.finance.yahoo.com/v11/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=${modules}&crumbStore=true`;
-  const { body, status } = await get(url);
-  console.log(`[yfSummary] ${symbol} status:${status} hasResult:${!!body?.quoteSummary?.result?.[0]}`);
-  return body?.quoteSummary?.result?.[0] || null;
+// Twelve Data quote — US real-time
+async function tdQuote(symbols) {
+  const { body } = await get(`${TD}/quote?symbol=${symbols.join(',')}&apikey=${TD_KEY}`);
+  if (!body) return [];
+  const items = symbols.length === 1 ? [body] : Object.values(body);
+  return items.filter(d => d && parseFloat(d.close) > 0).map(d => ({
+    symbol: d.symbol, price: parseFloat(d.close),
+    changesPercentage: parseFloat(d.percent_change), change: parseFloat(d.change),
+    open: parseFloat(d.open), dayHigh: parseFloat(d.high), dayLow: parseFloat(d.low),
+    previousClose: parseFloat(d.previous_close), name: d.name || d.symbol, exchange: d.exchange || '',
+  }));
 }
 
-// ── Yahoo Finance search ─────────────────────────────────────
-async function yfSearch(query) {
-  const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=8&newsCount=0`;
-  const { body } = await get(url);
-  return body?.quotes || [];
-}
-
-// ── Yahoo Finance historical ─────────────────────────────────
-async function yfHistorical(symbol, from, to) {
-  const p1 = Math.floor(new Date(from).getTime() / 1000);
-  const p2 = Math.floor(new Date(to).getTime()   / 1000);
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&period1=${p1}&period2=${p2}`;
-  const { body } = await get(url);
-  const chart = body?.chart?.result?.[0];
-  if (!chart) return [];
-  const ts     = chart.timestamp || [];
-  const closes = chart.indicators?.quote?.[0]?.close || [];
-  return ts.map((t, i) => ({ datetime: new Date(t*1000).toISOString().slice(0,10), close: closes[i] }))
-           .filter(d => d.close != null);
-}
-
-// ── HTTP Server ───────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   const origin = req.headers.origin;
   const parsed = parse(req.url, true);
@@ -110,29 +92,8 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(data));
   };
 
-  // /debug — tests Yahoo Finance endpoints live
-  if (path === '/debug') {
-    const symbol = q.symbol || 'AAPL';
-    const results = {};
-    const endpoints = [
-      `https://query1.finance.yahoo.com/v11/finance/quoteSummary/${symbol}?modules=price`,
-      `https://query2.finance.yahoo.com/v11/finance/quoteSummary/${symbol}?modules=price`,
-      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=price`,
-      `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=price`,
-      `https://query1.finance.yahoo.com/v8/finance/quote?symbols=${symbol}`,
-      `https://query2.finance.yahoo.com/v8/finance/quote?symbols=${symbol}`,
-    ];
-    for (const url of endpoints) {
-      try {
-        const { status, body, raw } = await get(url);
-        const key = url.replace('https://','').slice(0,60);
-        results[key] = { status, hasResult: !!body?.quoteSummary?.result?.[0] || !!body?.quoteResponse?.result?.[0], snippet: raw || JSON.stringify(body).slice(0,120) };
-      } catch(e) {
-        results[url.slice(0,60)] = { error: e.message };
-      }
-    }
-    json(results); return;
-  }
+  // /health
+  if (path === '/health') { json({ ok: true, version: '5.0', apis: 'TD+FMP+Marketaux' }); return; }
 
   // /quote?symbol=AAPL,RELIANCE.NS
   if (path === '/quote') {
@@ -142,77 +103,85 @@ const server = http.createServer(async (req, res) => {
     const globalSyms = symbols.filter(s => getMarket(s) !== 'US');
     const results    = [];
 
-    // US → Twelve Data (real-time)
+    // US → Twelve Data first, FMP fallback
     if (usSyms.length) {
       try {
-        const data  = await get(`https://api.twelvedata.com/quote?symbol=${usSyms.join(',')}&apikey=${TD_KEY}`);
-        const items = usSyms.length === 1 ? [data.body] : Object.values(data.body || {});
-        items.filter(d => d && parseFloat(d.close) > 0).forEach(d => results.push({
-          symbol: d.symbol, price: parseFloat(d.close),
-          changesPercentage: parseFloat(d.percent_change), change: parseFloat(d.change),
-          open: parseFloat(d.open), dayHigh: parseFloat(d.high), dayLow: parseFloat(d.low),
-          previousClose: parseFloat(d.previous_close), name: d.name || d.symbol, exchange: d.exchange || '',
-        }));
-      } catch(e) { console.warn('TD quote:', e.message); }
-      const fetched = new Set(results.map(r => r.symbol));
-      usSyms.filter(s => !fetched.has(s)).forEach(s => globalSyms.push(s));
+        const tdResults = await tdQuote(usSyms);
+        results.push(...tdResults);
+        const fetched = new Set(tdResults.map(r => r.symbol));
+        const missed  = usSyms.filter(s => !fetched.has(s));
+        if (missed.length) {
+          const fmpResults = await fmpQuote(missed);
+          results.push(...fmpResults);
+        }
+      } catch(e) {
+        try { results.push(...await fmpQuote(usSyms)); } catch(e2) {}
+      }
     }
 
-    // Global → Yahoo Finance v8
+    // Global → FMP (supports many exchanges)
     if (globalSyms.length) {
       try {
-        const raw = await yfQuote(globalSyms);
-        raw.filter(d => d?.regularMarketPrice).forEach(d => results.push({
-          symbol: d.symbol, price: d.regularMarketPrice,
-          changesPercentage: d.regularMarketChangePercent, change: d.regularMarketChange,
-          open: d.regularMarketOpen, dayHigh: d.regularMarketDayHigh, dayLow: d.regularMarketDayLow,
-          previousClose: d.regularMarketPreviousClose,
-          name: d.shortName || d.longName || d.symbol,
-          exchange: d.fullExchangeName || d.exchange || '', marketCap: d.marketCap,
-        }));
-      } catch(e) { console.warn('YF quote:', e.message); }
+        const fmpResults = await fmpQuote(globalSyms);
+        results.push(...fmpResults);
+        // Any FMP missed → try TD
+        const fetched = new Set(fmpResults.map(r => r.symbol));
+        const missed  = globalSyms.filter(s => !fetched.has(s));
+        if (missed.length) {
+          const tdResults = await tdQuote(missed);
+          results.push(...tdResults);
+        }
+      } catch(e) {}
     }
+
     json(results); return;
   }
 
-  // /profile?symbol=AAPL
+  // /profile?symbol=AAPL  — FMP profile + ratios-ttm
   if (path === '/profile') {
     const symbol = q.symbol || '';
     if (!symbol) { json({ error: 'symbol required' }, 400); return; }
     console.log(`[profile] ${symbol}`);
     try {
-      const r  = await yfSummary(symbol);
-      if (!r) throw new Error('empty result from Yahoo');
-      const p  = r.assetProfile         || {};
-      const sd = r.summaryDetail         || {};
-      const pr = r.price                 || {};
-      const fd = r.financialData         || {};
-      const ks = r.defaultKeyStatistics  || {};
-      const raw = v => v?.raw !== undefined ? v.raw : (typeof v === 'number' ? v : null);
+      const [profRes, ratioRes] = await Promise.all([
+        get(`${FMP}/profile/${encodeURIComponent(symbol)}?apikey=${FMP_KEY}`),
+        get(`${FMP}/ratios-ttm/${encodeURIComponent(symbol)}?apikey=${FMP_KEY}`),
+      ]);
+
+      const p = Array.isArray(profRes.body)  ? profRes.body[0]  : null;
+      const r = Array.isArray(ratioRes.body) ? ratioRes.body[0] : null;
+
+      if (!p) throw new Error(`FMP profile empty for ${symbol}`);
+
       const profile = {
-        symbol, name: pr.shortName || pr.longName || symbol,
-        description: p.longBusinessSummary || '',
-        sector: p.sector || '', industry: p.industry || '',
-        hq: [p.city, p.state, p.country].filter(Boolean).join(', '),
-        employees: raw(p.fullTimeEmployees), website: p.website || '',
-        exchange: pr.exchangeName || '',
-        marketCap: raw(pr.marketCap) || raw(sd.marketCap),
-        revenue: raw(fd.totalRevenue),
-        pe: raw(ks.trailingPE) || raw(sd.trailingPE),
-        pb: raw(ks.priceToBook),
-        roe: raw(fd.returnOnEquity),
-        de: raw(fd.debtToEquity),
-        grossMargin: raw(fd.grossMargins),
-        currentRatio: raw(fd.currentRatio),
-        eps: raw(ks.trailingEps),
-        forwardPE: raw(ks.forwardPE),
-        dividendYield: raw(sd.dividendYield) || raw(sd.trailingAnnualDividendYield),
-        beta: raw(sd.beta) || raw(ks.beta),
-        fiftyTwoWeekHigh: raw(sd.fiftyTwoWeekHigh),
-        fiftyTwoWeekLow: raw(sd.fiftyTwoWeekLow),
-        profitMargin: raw(fd.profitMargins),
-        revenueGrowth: raw(fd.revenueGrowth),
+        symbol,
+        name:         p.companyName       || symbol,
+        description:  p.description       || '',
+        sector:       p.sector            || '',
+        industry:     p.industry          || '',
+        hq:           [p.city, p.state, p.country].filter(Boolean).join(', '),
+        employees:    p.fullTimeEmployees  || null,
+        website:      p.website           || '',
+        exchange:     p.exchangeShortName || p.exchange || '',
+        marketCap:    p.mktCap,
+        revenue:      null,
+        // Ratios from FMP ratios-ttm (reliable, free tier)
+        pe:           r?.peRatioTTM,
+        pb:           r?.priceToBookRatioTTM,
+        roe:          r?.returnOnEquityTTM,
+        de:           r?.debtEquityRatioTTM,
+        grossMargin:  r?.grossProfitMarginTTM,
+        currentRatio: r?.currentRatioTTM,
+        eps:          r?.netIncomePerShareTTM,
+        forwardPE:    null,
+        dividendYield:r?.dividendYieldTTM,
+        beta:         p.beta,
+        fiftyTwoWeekHigh: p['52WeekHigh'] || p.range?.split('-')?.[1]?.trim() || null,
+        fiftyTwoWeekLow:  p['52WeekLow']  || p.range?.split('-')?.[0]?.trim() || null,
+        profitMargin: r?.netProfitMarginTTM,
+        revenueGrowth: null,
       };
+
       console.log(`[profile] ${symbol} ok — pe:${profile.pe} sector:${profile.sector}`);
       json(profile);
     } catch(e) {
@@ -227,16 +196,18 @@ const server = http.createServer(async (req, res) => {
     const query = q.query || q.symbol || '';
     if (!query) { json([]); return; }
     const results = [];
+    // TD search (good for global)
     try {
-      const data = await get(`https://api.twelvedata.com/symbol_search?symbol=${encodeURIComponent(query)}&outputsize=6&apikey=${TD_KEY}`);
-      (data.body?.data || []).filter(r => r.symbol && r.instrument_name && r.instrument_type === 'Common Stock')
+      const { body } = await get(`${TD}/symbol_search?symbol=${encodeURIComponent(query)}&outputsize=6&apikey=${TD_KEY}`);
+      (body?.data || []).filter(r => r.symbol && r.instrument_name && r.instrument_type === 'Common Stock')
         .forEach(r => results.push({ symbol: r.symbol, name: r.instrument_name, exchange: r.exchange || '' }));
     } catch(e) {}
+    // FMP search (good for US)
     try {
-      const raw = await yfSearch(query);
-      raw.filter(r => r.symbol && (r.shortname || r.longname) && r.quoteType === 'EQUITY')
+      const { body } = await get(`${FMP}/search?query=${encodeURIComponent(query)}&limit=8&apikey=${FMP_KEY}`);
+      (Array.isArray(body) ? body : []).filter(r => r.symbol && r.name)
         .forEach(r => { if (!results.find(x => x.symbol === r.symbol))
-          results.push({ symbol: r.symbol, name: r.shortname || r.longname, exchange: r.exchange || '' }); });
+          results.push({ symbol: r.symbol, name: r.name, exchange: r.stockExchange || r.exchangeShortName || '' }); });
     } catch(e) {}
     json(results.slice(0, 10)); return;
   }
@@ -245,15 +216,18 @@ const server = http.createServer(async (req, res) => {
   if (path === '/time_series') {
     const symbol = q.symbol || '';
     if (!symbol) { json({ values: [] }); return; }
+    // TD first (US, real-time accurate)
     if (getMarket(symbol) === 'US') {
       try {
-        const data = await get(`https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=1day&start_date=${q.start_date||''}&end_date=${q.end_date||''}&outputsize=365&order=ASC&apikey=${TD_KEY}`);
-        if (data.body?.values?.length) { json(data.body); return; }
+        const { body } = await get(`${TD}/time_series?symbol=${encodeURIComponent(symbol)}&interval=1day&start_date=${q.start_date||''}&end_date=${q.end_date||''}&outputsize=365&order=ASC&apikey=${TD_KEY}`);
+        if (body?.values?.length) { json(body); return; }
       } catch(e) {}
     }
+    // FMP historical (global coverage)
     try {
-      const vals = await yfHistorical(symbol, q.start_date || new Date(Date.now()-30*86400000).toISOString().slice(0,10), q.end_date || new Date().toISOString().slice(0,10));
-      json({ values: vals });
+      const { body } = await get(`${FMP}/historical-price-full/${encodeURIComponent(symbol)}?from=${q.start_date||''}&to=${q.end_date||''}&apikey=${FMP_KEY}`);
+      const hist = body?.historical || [];
+      json({ values: [...hist].reverse().map(d => ({ datetime: d.date, close: d.close })) });
     } catch(e) { json({ values: [] }); }
     return;
   }
@@ -261,8 +235,8 @@ const server = http.createServer(async (req, res) => {
   // /fx
   if (path === '/fx') {
     try {
-      const raw = await yfQuote(['USDINR=X', 'USDGBP=X']);
-      json(raw.map(d => ({ symbol: d.symbol, price: d.regularMarketPrice })));
+      const { body } = await get(`${FMP}/quote/USDINR,USDGBP?apikey=${FMP_KEY}`);
+      json(Array.isArray(body) ? body.map(d => ({ symbol: d.symbol, price: d.price })) : []);
     } catch(e) { json([]); }
     return;
   }
@@ -280,7 +254,7 @@ const server = http.createServer(async (req, res) => {
       url = `https://api.marketaux.com/v1/news/all?countries=${encodeURIComponent(q.country)}&filter_entities=true&language=en&limit=8&api_token=${MARKETAUX_KEY}`;
     else
       url = `https://api.marketaux.com/v1/news/all?filter_entities=true&language=en&limit=8&api_token=${MARKETAUX_KEY}`;
-    try { const d = await get(url); json(d.body || { data: [] }); }
+    try { const { body } = await get(url); json(body || { data: [] }); }
     catch(e) { json({ error: 'news failed' }, 502); }
     return;
   }
@@ -300,4 +274,4 @@ wss.on('connection', clientWs => {
   clientWs.on('error', e => { console.error('WS cl:', e.message); upstream.close(); });
 });
 
-server.listen(PORT, () => console.log(`FinWise proxy v4.0 on :${PORT}`));
+server.listen(PORT, () => console.log(`FinWise proxy v5.0 on :${PORT}`));
