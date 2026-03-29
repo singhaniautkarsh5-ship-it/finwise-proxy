@@ -10,8 +10,8 @@ const FMP_KEY       = process.env.FMP_KEY        || '0QaZFReu3rNLGWHlfuYwehPHOX9
 const MARKETAUX_KEY = process.env.MARKETAUX_KEY  || '';
 const ALLOWED       = process.env.ALLOWED_ORIGIN || '*';
 
-const FMP = 'https://financialmodelingprep.com/api/v3';
-const TD  = 'https://api.twelvedata.com';
+const FMP  = 'https://financialmodelingprep.com/stable';
+const TD   = 'https://api.twelvedata.com';
 
 function cors(origin) {
   return {
@@ -55,7 +55,7 @@ function getMarket(s) {
 
 // FMP quote — works for US stocks, server-side no CORS issue
 async function fmpQuote(symbols) {
-  const { body } = await get(`${FMP}/quote/${symbols.join(',')}?apikey=${FMP_KEY}`);
+  const { body } = await get(`${FMP}/quote?symbol=${symbols.join(',')}&apikey=${FMP_KEY}`);
   if (!Array.isArray(body)) return [];
   return body.filter(d => d?.price > 0).map(d => ({
     symbol: d.symbol, price: d.price,
@@ -95,20 +95,21 @@ const server = http.createServer(async (req, res) => {
   // /health
   if (path === '/health') { json({ ok: true, version: '5.0', apis: 'TD+FMP+Marketaux' }); return; }
 
-  // /debug-fmp — test FMP directly
+  // /debug-fmp — test FMP stable endpoints
   if (path === '/debug-fmp') {
     const symbol = q.symbol || 'AAPL';
     const results = {};
     const tests = [
-      `${FMP}/profile/${symbol}?apikey=${FMP_KEY}`,
-      `${FMP}/quote/${symbol}?apikey=${FMP_KEY}`,
-      `${FMP}/ratios-ttm/${symbol}?apikey=${FMP_KEY}`,
+      `${FMP}/profile?symbol=${symbol}&apikey=${FMP_KEY}`,
+      `${FMP}/quote?symbol=${symbol}&apikey=${FMP_KEY}`,
+      `${FMP}/ratios-ttm?symbol=${symbol}&apikey=${FMP_KEY}`,
+      `${FMP}/key-metrics-ttm?symbol=${symbol}&apikey=${FMP_KEY}`,
     ];
     for (const url of tests) {
       try {
         const { status, body } = await get(url);
-        const key = url.split('/api/v3/')[1].split('?')[0];
-        results[key] = { status, bodyType: typeof body, isArray: Array.isArray(body), length: Array.isArray(body) ? body.length : null, snippet: JSON.stringify(body).slice(0, 200) };
+        const key = url.split('/stable/')[1].split('?')[0];
+        results[key] = { status, isArray: Array.isArray(body), length: Array.isArray(body) ? body.length : null, snippet: JSON.stringify(body).slice(0, 200) };
       } catch(e) { results[url] = { error: e.message }; }
     }
     json(results); return;
@@ -162,41 +163,42 @@ const server = http.createServer(async (req, res) => {
     if (!symbol) { json({ error: 'symbol required' }, 400); return; }
     console.log(`[profile] ${symbol}`);
     try {
-      const [profRes, ratioRes] = await Promise.all([
-        get(`${FMP}/profile/${encodeURIComponent(symbol)}?apikey=${FMP_KEY}`),
-        get(`${FMP}/ratios-ttm/${encodeURIComponent(symbol)}?apikey=${FMP_KEY}`),
+      const [profRes, ratioRes, keyRes] = await Promise.all([
+        get(`${FMP}/profile?symbol=${encodeURIComponent(symbol)}&apikey=${FMP_KEY}`),
+        get(`${FMP}/ratios-ttm?symbol=${encodeURIComponent(symbol)}&apikey=${FMP_KEY}`),
+        get(`${FMP}/key-metrics-ttm?symbol=${encodeURIComponent(symbol)}&apikey=${FMP_KEY}`),
       ]);
 
-      const p = Array.isArray(profRes.body)  ? profRes.body[0]  : null;
+      const p = Array.isArray(profRes.body)  ? profRes.body[0]  : profRes.body?.length ? profRes.body[0] : null;
       const r = Array.isArray(ratioRes.body) ? ratioRes.body[0] : null;
+      const k = Array.isArray(keyRes.body)   ? keyRes.body[0]   : null;
 
-      if (!p) throw new Error(`FMP profile empty for ${symbol}`);
+      if (!p) throw new Error(`FMP profile empty for ${symbol} — status:${profRes.status}`);
 
       const profile = {
         symbol,
-        name:         p.companyName       || symbol,
+        name:         p.companyName       || p.name          || symbol,
         description:  p.description       || '',
         sector:       p.sector            || '',
         industry:     p.industry          || '',
         hq:           [p.city, p.state, p.country].filter(Boolean).join(', '),
-        employees:    p.fullTimeEmployees  || null,
+        employees:    p.fullTimeEmployees  || p.employees      || null,
         website:      p.website           || '',
-        exchange:     p.exchangeShortName || p.exchange || '',
-        marketCap:    p.mktCap,
-        revenue:      null,
-        // Ratios from FMP ratios-ttm (reliable, free tier)
-        pe:           r?.peRatioTTM,
-        pb:           r?.priceToBookRatioTTM,
-        roe:          r?.returnOnEquityTTM,
-        de:           r?.debtEquityRatioTTM,
+        exchange:     p.exchangeShortName || p.exchange        || '',
+        marketCap:    p.mktCap            || p.marketCap,
+        revenue:      k?.revenuePerShareTTM ? null : null,
+        pe:           r?.peRatioTTM        || k?.peRatioTTM,
+        pb:           r?.priceToBookRatioTTM || k?.pbRatioTTM,
+        roe:          r?.returnOnEquityTTM  || k?.roeTTM,
+        de:           r?.debtEquityRatioTTM || k?.debtToEquityTTM,
         grossMargin:  r?.grossProfitMarginTTM,
         currentRatio: r?.currentRatioTTM,
-        eps:          r?.netIncomePerShareTTM,
+        eps:          r?.netIncomePerShareTTM || k?.netIncomePerShareTTM,
         forwardPE:    null,
-        dividendYield:r?.dividendYieldTTM,
+        dividendYield:r?.dividendYieldTTM   || k?.dividendYieldTTM,
         beta:         p.beta,
-        fiftyTwoWeekHigh: p['52WeekHigh'] || p.range?.split('-')?.[1]?.trim() || null,
-        fiftyTwoWeekLow:  p['52WeekLow']  || p.range?.split('-')?.[0]?.trim() || null,
+        fiftyTwoWeekHigh: p.range ? parseFloat(p.range.split('-')[1]) : null,
+        fiftyTwoWeekLow:  p.range ? parseFloat(p.range.split('-')[0]) : null,
         profitMargin: r?.netProfitMarginTTM,
         revenueGrowth: null,
       };
@@ -223,8 +225,7 @@ const server = http.createServer(async (req, res) => {
     } catch(e) {}
     // FMP search (good for US)
     try {
-      const { body } = await get(`${FMP}/search?query=${encodeURIComponent(query)}&limit=8&apikey=${FMP_KEY}`);
-      (Array.isArray(body) ? body : []).filter(r => r.symbol && r.name)
+      const { body } = await get(`${FMP}/search?query=${encodeURIComponent(query)}&limit=8&apikey=${FMP_KEY}`);      (Array.isArray(body) ? body : []).filter(r => r.symbol && r.name)
         .forEach(r => { if (!results.find(x => x.symbol === r.symbol))
           results.push({ symbol: r.symbol, name: r.name, exchange: r.stockExchange || r.exchangeShortName || '' }); });
     } catch(e) {}
@@ -244,7 +245,7 @@ const server = http.createServer(async (req, res) => {
     }
     // FMP historical (global coverage)
     try {
-      const { body } = await get(`${FMP}/historical-price-full/${encodeURIComponent(symbol)}?from=${q.start_date||''}&to=${q.end_date||''}&apikey=${FMP_KEY}`);
+      const { body } = await get(`${FMP}/historical-price-eod/full?symbol=${encodeURIComponent(symbol)}&from=${q.start_date||''}&to=${q.end_date||''}&apikey=${FMP_KEY}`);
       const hist = body?.historical || [];
       json({ values: [...hist].reverse().map(d => ({ datetime: d.date, close: d.close })) });
     } catch(e) { json({ values: [] }); }
@@ -254,7 +255,7 @@ const server = http.createServer(async (req, res) => {
   // /fx
   if (path === '/fx') {
     try {
-      const { body } = await get(`${FMP}/quote/USDINR,USDGBP?apikey=${FMP_KEY}`);
+      const { body } = await get(`${FMP}/quote?symbol=USDINR,USDGBP&apikey=${FMP_KEY}`);
       json(Array.isArray(body) ? body.map(d => ({ symbol: d.symbol, price: d.price })) : []);
     } catch(e) { json([]); }
     return;
