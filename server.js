@@ -165,44 +165,49 @@ const server = http.createServer(async (req, res) => {
     if (!symbol) { json({ error: 'symbol required' }, 400); return; }
     console.log(`[profile] ${symbol}`);
     try {
-      const [profRes, ratioRes, keyRes] = await Promise.all([
+      const [profRes, ratioRes, keyRes, quoteRes] = await Promise.all([
         get(`${FMP}/profile?symbol=${encodeURIComponent(symbol)}&apikey=${FMP_KEY}`),
         get(`${FMP}/ratios-ttm?symbol=${encodeURIComponent(symbol)}&apikey=${FMP_KEY}`),
         get(`${FMP}/key-metrics-ttm?symbol=${encodeURIComponent(symbol)}&apikey=${FMP_KEY}`),
+        get(`${FMP}/quote?symbol=${encodeURIComponent(symbol)}&apikey=${FMP_KEY}`),
       ]);
 
-      const p = Array.isArray(profRes.body)  ? profRes.body[0]  : profRes.body?.length ? profRes.body[0] : null;
+      const p = Array.isArray(profRes.body)  ? profRes.body[0]  : null;
       const r = Array.isArray(ratioRes.body) ? ratioRes.body[0] : null;
       const k = Array.isArray(keyRes.body)   ? keyRes.body[0]   : null;
+      const q2 = Array.isArray(quoteRes.body) ? quoteRes.body[0] : null;
 
       if (!p) throw new Error(`FMP profile empty for ${symbol} — status:${profRes.status}`);
 
+      const range = (p.range || '').split('-');
       const profile = {
         symbol,
-        name:         p.companyName       || p.name          || symbol,
-        description:  p.description       || '',
-        sector:       p.sector            || '',
-        industry:     p.industry          || '',
-        hq:           [p.city, p.state, p.country].filter(Boolean).join(', '),
-        employees:    p.fullTimeEmployees  || p.employees      || null,
-        website:      p.website           || '',
-        exchange:     p.exchangeShortName || p.exchange        || '',
-        marketCap:    p.mktCap            || p.marketCap,
-        revenue:      k?.revenuePerShareTTM ? null : null,
-        pe:           r?.peRatioTTM        || k?.peRatioTTM,
-        pb:           r?.priceToBookRatioTTM || k?.pbRatioTTM,
-        roe:          r?.returnOnEquityTTM  || k?.roeTTM,
-        de:           r?.debtEquityRatioTTM || k?.debtToEquityTTM,
-        grossMargin:  r?.grossProfitMarginTTM,
-        currentRatio: r?.currentRatioTTM,
-        eps:          r?.netIncomePerShareTTM || k?.netIncomePerShareTTM,
-        forwardPE:    null,
-        dividendYield:r?.dividendYieldTTM   || k?.dividendYieldTTM,
-        beta:         p.beta,
-        fiftyTwoWeekHigh: p.range ? parseFloat(p.range.split('-')[1]) : null,
-        fiftyTwoWeekLow:  p.range ? parseFloat(p.range.split('-')[0]) : null,
-        profitMargin: r?.netProfitMarginTTM,
-        revenueGrowth: null,
+        name:             p.companyName        || symbol,
+        description:      p.description        || '',
+        sector:           p.sector             || '',
+        industry:         p.industry           || '',
+        hq:               [p.city, p.state, p.country].filter(Boolean).join(', '),
+        employees:        p.fullTimeEmployees   || null,
+        website:          p.website            || '',
+        exchange:         p.exchange           || '',
+        marketCap:        p.marketCap,
+        revenue:          null,
+        logo:             p.image              || '',
+        // Ratios — exact field names from ratios-ttm
+        pe:               r?.priceToEarningsRatioTTM,
+        pb:               r?.priceToBookRatioTTM,
+        roe:              k?.returnOnEquityTTM,
+        de:               r?.debtToEquityRatioTTM,
+        grossMargin:      r?.grossProfitMarginTTM,
+        currentRatio:     r?.currentRatioTTM,
+        eps:              r?.netIncomePerShareTTM,
+        forwardPE:        null,
+        dividendYield:    r?.dividendYieldTTM,
+        beta:             p.beta,
+        fiftyTwoWeekHigh: q2?.yearHigh  || parseFloat(range[1]) || null,
+        fiftyTwoWeekLow:  q2?.yearLow   || parseFloat(range[0]) || null,
+        profitMargin:     r?.netProfitMarginTTM,
+        revenueGrowth:    null,
       };
 
       console.log(`[profile] ${symbol} ok — pe:${profile.pe} sector:${profile.sector}`);
