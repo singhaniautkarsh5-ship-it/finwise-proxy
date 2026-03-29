@@ -95,6 +95,25 @@ const server = http.createServer(async (req, res) => {
   // /health
   if (path === '/health') { json({ ok: true, version: '5.0', apis: 'TD+FMP+Marketaux' }); return; }
 
+  // /debug-fmp — test FMP directly
+  if (path === '/debug-fmp') {
+    const symbol = q.symbol || 'AAPL';
+    const results = {};
+    const tests = [
+      `${FMP}/profile/${symbol}?apikey=${FMP_KEY}`,
+      `${FMP}/quote/${symbol}?apikey=${FMP_KEY}`,
+      `${FMP}/ratios-ttm/${symbol}?apikey=${FMP_KEY}`,
+    ];
+    for (const url of tests) {
+      try {
+        const { status, body } = await get(url);
+        const key = url.split('/api/v3/')[1].split('?')[0];
+        results[key] = { status, bodyType: typeof body, isArray: Array.isArray(body), length: Array.isArray(body) ? body.length : null, snippet: JSON.stringify(body).slice(0, 200) };
+      } catch(e) { results[url] = { error: e.message }; }
+    }
+    json(results); return;
+  }
+
   // /quote?symbol=AAPL,RELIANCE.NS
   if (path === '/quote') {
     const symbols    = (q.symbol || '').split(',').map(s => s.trim()).filter(Boolean);
