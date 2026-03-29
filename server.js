@@ -5,7 +5,7 @@ import { WebSocketServer } from 'ws';
 import WebSocket from 'ws';
 import yahooFinance from 'yahoo-finance2';
 
-yahooFinance.setGlobalConfig({ validation: { logErrors: false } });
+
 
 const PORT          = process.env.PORT           || 3001;
 const TD_KEY        = process.env.TD_KEY         || 'be5cb92f2c744ed98fd46f787a62088d';
