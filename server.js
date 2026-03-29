@@ -3,17 +3,13 @@ import https from 'https';
 import { parse } from 'url';
 import { WebSocketServer } from 'ws';
 import WebSocket from 'ws';
-import * as yfModule from "yahoo-finance2";
 
 const PORT          = process.env.PORT           || 3001;
 const TD_KEY        = process.env.TD_KEY         || 'be5cb92f2c744ed98fd46f787a62088d';
 const MARKETAUX_KEY = process.env.MARKETAUX_KEY  || '';
 const ALLOWED       = process.env.ALLOWED_ORIGIN || '*';
 
-// yahoo-finance2 v2 exports differently depending on bundler —
-// handle both named and default export patterns
-const yahooFinance = yfModule.default?.default ?? yfModule.default ?? yfModule;
-
+// ── CORS ─────────────────────────────────────────────────────
 function cors(origin) {
   return {
     'Access-Control-Allow-Origin':  ALLOWED === '*' ? (origin || '*') : ALLOWED,
@@ -23,20 +19,31 @@ function cors(origin) {
   };
 }
 
-function fetchJSON(url) {
+// ── HTTPS GET with full browser-like headers ─────────────────
+function get(url) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = https.get({
       hostname: u.hostname,
       path:     u.pathname + u.search,
-      headers:  { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
+      headers: {
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept':          'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'identity',
+        'Referer':         'https://finance.yahoo.com/',
+        'Origin':          'https://finance.yahoo.com',
+      },
     }, res => {
       let body = '';
       res.on('data', d => body += d);
-      res.on('end', () => { try { resolve(JSON.parse(body)); } catch(e) { resolve(null); } });
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, headers: res.headers, body: JSON.parse(body) }); }
+        catch(e) { resolve({ status: res.statusCode, headers: res.headers, body: null, raw: body.slice(0,200) }); }
+      });
     });
     req.on('error', reject);
-    req.setTimeout(8000, () => { req.destroy(); reject(new Error('timeout')); });
+    req.setTimeout(10000, () => { req.destroy(); reject(new Error('timeout')); });
   });
 }
 
@@ -51,6 +58,45 @@ function getMarket(s) {
   return 'US';
 }
 
+// ── Yahoo Finance v8 quote (works server-side) ───────────────
+async function yfQuote(symbols) {
+  const syms = Array.isArray(symbols) ? symbols : [symbols];
+  const url = `https://query1.finance.yahoo.com/v8/finance/quote?symbols=${encodeURIComponent(syms.join(','))}&fields=regularMarketPrice,regularMarketChangePercent,regularMarketChange,regularMarketOpen,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose,shortName,longName,fullExchangeName,sector,marketCap`;
+  const { body } = await get(url);
+  return body?.quoteResponse?.result || [];
+}
+
+// ── Yahoo Finance quoteSummary (profile + ratios) ────────────
+async function yfSummary(symbol) {
+  const modules = 'assetProfile,summaryDetail,price,financialData,defaultKeyStatistics';
+  const url = `https://query1.finance.yahoo.com/v11/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=${modules}&crumbStore=true`;
+  const { body, status } = await get(url);
+  console.log(`[yfSummary] ${symbol} status:${status} hasResult:${!!body?.quoteSummary?.result?.[0]}`);
+  return body?.quoteSummary?.result?.[0] || null;
+}
+
+// ── Yahoo Finance search ─────────────────────────────────────
+async function yfSearch(query) {
+  const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=8&newsCount=0`;
+  const { body } = await get(url);
+  return body?.quotes || [];
+}
+
+// ── Yahoo Finance historical ─────────────────────────────────
+async function yfHistorical(symbol, from, to) {
+  const p1 = Math.floor(new Date(from).getTime() / 1000);
+  const p2 = Math.floor(new Date(to).getTime()   / 1000);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&period1=${p1}&period2=${p2}`;
+  const { body } = await get(url);
+  const chart = body?.chart?.result?.[0];
+  if (!chart) return [];
+  const ts     = chart.timestamp || [];
+  const closes = chart.indicators?.quote?.[0]?.close || [];
+  return ts.map((t, i) => ({ datetime: new Date(t*1000).toISOString().slice(0,10), close: closes[i] }))
+           .filter(d => d.close != null);
+}
+
+// ── HTTP Server ───────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   const origin = req.headers.origin;
   const parsed = parse(req.url, true);
@@ -64,18 +110,8 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(data));
   };
 
-  if (path === '/health') {
-    const d = yfModule.default;
-    json({
-      ok: true, version: '3.4',
-      moduleKeys: Object.keys(yfModule),
-      defaultKeys: d ? Object.keys(d).slice(0, 8) : null,
-      defaultDefaultKeys: d?.default ? Object.keys(d.default).slice(0, 8) : null,
-      hasQuote: typeof yahooFinance.quote,
-      hasSummary: typeof yahooFinance.quoteSummary,
-    });
-    return;
-  }
+  // /health
+  if (path === '/health') { json({ ok: true, version: '4.0' }); return; }
 
   // /quote?symbol=AAPL,RELIANCE.NS
   if (path === '/quote') {
@@ -85,10 +121,11 @@ const server = http.createServer(async (req, res) => {
     const globalSyms = symbols.filter(s => getMarket(s) !== 'US');
     const results    = [];
 
+    // US → Twelve Data (real-time)
     if (usSyms.length) {
       try {
-        const data  = await fetchJSON(`https://api.twelvedata.com/quote?symbol=${usSyms.join(',')}&apikey=${TD_KEY}`);
-        const items = usSyms.length === 1 ? [data] : Object.values(data || {});
+        const data  = await get(`https://api.twelvedata.com/quote?symbol=${usSyms.join(',')}&apikey=${TD_KEY}`);
+        const items = usSyms.length === 1 ? [data.body] : Object.values(data.body || {});
         items.filter(d => d && parseFloat(d.close) > 0).forEach(d => results.push({
           symbol: d.symbol, price: parseFloat(d.close),
           changesPercentage: parseFloat(d.percent_change), change: parseFloat(d.change),
@@ -100,11 +137,11 @@ const server = http.createServer(async (req, res) => {
       usSyms.filter(s => !fetched.has(s)).forEach(s => globalSyms.push(s));
     }
 
+    // Global → Yahoo Finance v8
     if (globalSyms.length) {
       try {
-        const raw = await yahooFinance.quote(globalSyms.length === 1 ? globalSyms[0] : globalSyms);
-        const arr = Array.isArray(raw) ? raw : [raw];
-        arr.filter(d => d?.regularMarketPrice).forEach(d => results.push({
+        const raw = await yfQuote(globalSyms);
+        raw.filter(d => d?.regularMarketPrice).forEach(d => results.push({
           symbol: d.symbol, price: d.regularMarketPrice,
           changesPercentage: d.regularMarketChangePercent, change: d.regularMarketChange,
           open: d.regularMarketOpen, dayHigh: d.regularMarketDayHigh, dayLow: d.regularMarketDayLow,
@@ -121,48 +158,44 @@ const server = http.createServer(async (req, res) => {
   if (path === '/profile') {
     const symbol = q.symbol || '';
     if (!symbol) { json({ error: 'symbol required' }, 400); return; }
-    console.log(`[profile] ${symbol} — using quoteSummary`);
+    console.log(`[profile] ${symbol}`);
     try {
-      const r  = await yahooFinance.quoteSummary(symbol, {
-        modules: ['assetProfile', 'summaryDetail', 'price', 'financialData', 'defaultKeyStatistics'],
-      });
-      console.log(`[profile] ${symbol} raw keys:`, Object.keys(r || {}));
+      const r  = await yfSummary(symbol);
+      if (!r) throw new Error('empty result from Yahoo');
       const p  = r.assetProfile         || {};
       const sd = r.summaryDetail         || {};
       const pr = r.price                 || {};
       const fd = r.financialData         || {};
       const ks = r.defaultKeyStatistics  || {};
+      const raw = v => v?.raw !== undefined ? v.raw : (typeof v === 'number' ? v : null);
       const profile = {
-        symbol,
-        name:             pr.shortName || pr.longName || symbol,
-        description:      p.longBusinessSummary || '',
-        sector:           p.sector   || '',
-        industry:         p.industry || '',
-        hq:               [p.city, p.state, p.country].filter(Boolean).join(', '),
-        employees:        p.fullTimeEmployees || null,
-        website:          p.website  || '',
-        exchange:         pr.exchangeName || '',
-        marketCap:        pr.marketCap || sd.marketCap,
-        revenue:          fd.totalRevenue,
-        pe:               ks.trailingPE  || sd.trailingPE,
-        pb:               ks.priceToBook,
-        roe:              fd.returnOnEquity,
-        de:               fd.debtToEquity,
-        grossMargin:      fd.grossMargins,
-        currentRatio:     fd.currentRatio,
-        eps:              ks.trailingEps,
-        forwardPE:        ks.forwardPE,
-        dividendYield:    sd.dividendYield || sd.trailingAnnualDividendYield,
-        beta:             sd.beta || ks.beta,
-        fiftyTwoWeekHigh: sd.fiftyTwoWeekHigh,
-        fiftyTwoWeekLow:  sd.fiftyTwoWeekLow,
-        profitMargin:     fd.profitMargins,
-        revenueGrowth:    fd.revenueGrowth,
+        symbol, name: pr.shortName || pr.longName || symbol,
+        description: p.longBusinessSummary || '',
+        sector: p.sector || '', industry: p.industry || '',
+        hq: [p.city, p.state, p.country].filter(Boolean).join(', '),
+        employees: raw(p.fullTimeEmployees), website: p.website || '',
+        exchange: pr.exchangeName || '',
+        marketCap: raw(pr.marketCap) || raw(sd.marketCap),
+        revenue: raw(fd.totalRevenue),
+        pe: raw(ks.trailingPE) || raw(sd.trailingPE),
+        pb: raw(ks.priceToBook),
+        roe: raw(fd.returnOnEquity),
+        de: raw(fd.debtToEquity),
+        grossMargin: raw(fd.grossMargins),
+        currentRatio: raw(fd.currentRatio),
+        eps: raw(ks.trailingEps),
+        forwardPE: raw(ks.forwardPE),
+        dividendYield: raw(sd.dividendYield) || raw(sd.trailingAnnualDividendYield),
+        beta: raw(sd.beta) || raw(ks.beta),
+        fiftyTwoWeekHigh: raw(sd.fiftyTwoWeekHigh),
+        fiftyTwoWeekLow: raw(sd.fiftyTwoWeekLow),
+        profitMargin: raw(fd.profitMargins),
+        revenueGrowth: raw(fd.revenueGrowth),
       };
-      console.log(`[profile] ${symbol} ok — pe:${profile.pe} sector:${profile.sector} name:${profile.name}`);
+      console.log(`[profile] ${symbol} ok — pe:${profile.pe} sector:${profile.sector}`);
       json(profile);
     } catch(e) {
-      console.error(`[profile] ${symbol} FAILED:`, e.message, e.stack?.split('\n')[1]);
+      console.error(`[profile] ${symbol} failed:`, e.message);
       json({ symbol, name: symbol, description: '', sector: '', industry: '', _error: e.message });
     }
     return;
@@ -174,13 +207,13 @@ const server = http.createServer(async (req, res) => {
     if (!query) { json([]); return; }
     const results = [];
     try {
-      const data = await fetchJSON(`https://api.twelvedata.com/symbol_search?symbol=${encodeURIComponent(query)}&outputsize=6&apikey=${TD_KEY}`);
-      (data?.data || []).filter(r => r.symbol && r.instrument_name && r.instrument_type === 'Common Stock')
+      const data = await get(`https://api.twelvedata.com/symbol_search?symbol=${encodeURIComponent(query)}&outputsize=6&apikey=${TD_KEY}`);
+      (data.body?.data || []).filter(r => r.symbol && r.instrument_name && r.instrument_type === 'Common Stock')
         .forEach(r => results.push({ symbol: r.symbol, name: r.instrument_name, exchange: r.exchange || '' }));
     } catch(e) {}
     try {
-      const data = await yahooFinance.search(query, { quotesCount: 8, newsCount: 0 });
-      (data.quotes || []).filter(r => r.symbol && (r.shortname || r.longname) && r.quoteType === 'EQUITY')
+      const raw = await yfSearch(query);
+      raw.filter(r => r.symbol && (r.shortname || r.longname) && r.quoteType === 'EQUITY')
         .forEach(r => { if (!results.find(x => x.symbol === r.symbol))
           results.push({ symbol: r.symbol, name: r.shortname || r.longname, exchange: r.exchange || '' }); });
     } catch(e) {}
@@ -193,15 +226,13 @@ const server = http.createServer(async (req, res) => {
     if (!symbol) { json({ values: [] }); return; }
     if (getMarket(symbol) === 'US') {
       try {
-        const data = await fetchJSON(`https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=1day&start_date=${q.start_date||''}&end_date=${q.end_date||''}&outputsize=365&order=ASC&apikey=${TD_KEY}`);
-        if (data?.values?.length) { json(data); return; }
+        const data = await get(`https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=1day&start_date=${q.start_date||''}&end_date=${q.end_date||''}&outputsize=365&order=ASC&apikey=${TD_KEY}`);
+        if (data.body?.values?.length) { json(data.body); return; }
       } catch(e) {}
     }
     try {
-      const from = new Date(q.start_date || Date.now() - 30*86400000);
-      const to   = new Date(q.end_date   || Date.now());
-      const data = await yahooFinance.historical(symbol, { period1: from, period2: to, interval: '1d' });
-      json({ values: (data || []).map(d => ({ datetime: d.date.toISOString().slice(0,10), close: d.close })) });
+      const vals = await yfHistorical(symbol, q.start_date || new Date(Date.now()-30*86400000).toISOString().slice(0,10), q.end_date || new Date().toISOString().slice(0,10));
+      json({ values: vals });
     } catch(e) { json({ values: [] }); }
     return;
   }
@@ -209,8 +240,8 @@ const server = http.createServer(async (req, res) => {
   // /fx
   if (path === '/fx') {
     try {
-      const raw = await yahooFinance.quote(['USDINR=X', 'USDGBP=X']);
-      json((Array.isArray(raw) ? raw : [raw]).map(d => ({ symbol: d.symbol, price: d.regularMarketPrice })));
+      const raw = await yfQuote(['USDINR=X', 'USDGBP=X']);
+      json(raw.map(d => ({ symbol: d.symbol, price: d.regularMarketPrice })));
     } catch(e) { json([]); }
     return;
   }
@@ -228,7 +259,7 @@ const server = http.createServer(async (req, res) => {
       url = `https://api.marketaux.com/v1/news/all?countries=${encodeURIComponent(q.country)}&filter_entities=true&language=en&limit=8&api_token=${MARKETAUX_KEY}`;
     else
       url = `https://api.marketaux.com/v1/news/all?filter_entities=true&language=en&limit=8&api_token=${MARKETAUX_KEY}`;
-    try { json(await fetchJSON(url) || { data: [] }); }
+    try { const d = await get(url); json(d.body || { data: [] }); }
     catch(e) { json({ error: 'news failed' }, 502); }
     return;
   }
@@ -236,6 +267,7 @@ const server = http.createServer(async (req, res) => {
   json({ error: 'not found' }, 404);
 });
 
+// ── WebSocket — Twelve Data real-time ────────────────────────
 const wss = new WebSocketServer({ server, path: '/ws/td' });
 wss.on('connection', clientWs => {
   const upstream = new WebSocket(`wss://ws.twelvedata.com/v1/quotes/price?apikey=${TD_KEY}`);
@@ -247,4 +279,4 @@ wss.on('connection', clientWs => {
   clientWs.on('error', e => { console.error('WS cl:', e.message); upstream.close(); });
 });
 
-server.listen(PORT, () => console.log(`FinWise proxy v3.2 on :${PORT}`));
+server.listen(PORT, () => console.log(`FinWise proxy v4.0 on :${PORT}`));

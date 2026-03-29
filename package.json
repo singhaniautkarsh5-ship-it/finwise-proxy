@@ -1,12 +1,11 @@
 {
   "name": "finwise-proxy",
-  "version": "3.1.0",
+  "version": "4.0.0",
   "type": "module",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "dependencies": {
-    "ws": "^8.18.0",
-    "yahoo-finance2": "^2.13.3"
+    "ws": "^8.18.0"
   },
   "engines": { "node": ">=18" }
 }
