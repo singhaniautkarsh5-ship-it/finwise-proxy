@@ -3,14 +3,16 @@ import https from 'https';
 import { parse } from 'url';
 import { WebSocketServer } from 'ws';
 import WebSocket from 'ws';
-import yahooFinance from 'yahoo-finance2';
-
-
+import yf from 'yahoo-finance2';
 
 const PORT          = process.env.PORT           || 3001;
 const TD_KEY        = process.env.TD_KEY         || 'be5cb92f2c744ed98fd46f787a62088d';
 const MARKETAUX_KEY = process.env.MARKETAUX_KEY  || '';
 const ALLOWED       = process.env.ALLOWED_ORIGIN || '*';
+
+// yahoo-finance2 v2 exports differently depending on bundler —
+// handle both named and default export patterns
+const yahooFinance = yf.default ?? yf;
 
 function cors(origin) {
   return {
@@ -62,15 +64,18 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(data));
   };
 
-  if (path === '/health') { json({ ok: true, version: '3.1' }); return; }
+  if (path === '/health') {
+    json({ ok: true, version: '3.2', yfType: typeof yahooFinance, hasSummary: typeof yahooFinance.quoteSummary });
+    return;
+  }
 
   // /quote?symbol=AAPL,RELIANCE.NS
   if (path === '/quote') {
-    const symbols   = (q.symbol || '').split(',').map(s => s.trim()).filter(Boolean);
+    const symbols    = (q.symbol || '').split(',').map(s => s.trim()).filter(Boolean);
     if (!symbols.length) { json([]); return; }
-    const usSyms    = symbols.filter(s => getMarket(s) === 'US');
+    const usSyms     = symbols.filter(s => getMarket(s) === 'US');
     const globalSyms = symbols.filter(s => getMarket(s) !== 'US');
-    const results   = [];
+    const results    = [];
 
     if (usSyms.length) {
       try {
@@ -108,38 +113,49 @@ const server = http.createServer(async (req, res) => {
   if (path === '/profile') {
     const symbol = q.symbol || '';
     if (!symbol) { json({ error: 'symbol required' }, 400); return; }
-    console.log(`[profile] ${symbol}`);
+    console.log(`[profile] ${symbol} — using quoteSummary`);
     try {
       const r  = await yahooFinance.quoteSummary(symbol, {
         modules: ['assetProfile', 'summaryDetail', 'price', 'financialData', 'defaultKeyStatistics'],
       });
-      const p  = r.assetProfile        || {};
-      const sd = r.summaryDetail        || {};
-      const pr = r.price               || {};
-      const fd = r.financialData       || {};
-      const ks = r.defaultKeyStatistics || {};
+      console.log(`[profile] ${symbol} raw keys:`, Object.keys(r || {}));
+      const p  = r.assetProfile         || {};
+      const sd = r.summaryDetail         || {};
+      const pr = r.price                 || {};
+      const fd = r.financialData         || {};
+      const ks = r.defaultKeyStatistics  || {};
       const profile = {
-        symbol, name: pr.shortName || pr.longName || symbol,
-        description: p.longBusinessSummary || '',
-        sector: p.sector || '', industry: p.industry || '',
-        hq: [p.city, p.state, p.country].filter(Boolean).join(', '),
-        employees: p.fullTimeEmployees || null, website: p.website || '',
-        exchange: pr.exchangeName || '',
-        marketCap: pr.marketCap || sd.marketCap, revenue: fd.totalRevenue,
-        pe: ks.trailingPE || sd.trailingPE, pb: ks.priceToBook,
-        roe: fd.returnOnEquity, de: fd.debtToEquity,
-        grossMargin: fd.grossMargins, currentRatio: fd.currentRatio,
-        eps: ks.trailingEps, forwardPE: ks.forwardPE,
-        dividendYield: sd.dividendYield || sd.trailingAnnualDividendYield,
-        beta: sd.beta || ks.beta,
-        fiftyTwoWeekHigh: sd.fiftyTwoWeekHigh, fiftyTwoWeekLow: sd.fiftyTwoWeekLow,
-        profitMargin: fd.profitMargins, revenueGrowth: fd.revenueGrowth,
+        symbol,
+        name:             pr.shortName || pr.longName || symbol,
+        description:      p.longBusinessSummary || '',
+        sector:           p.sector   || '',
+        industry:         p.industry || '',
+        hq:               [p.city, p.state, p.country].filter(Boolean).join(', '),
+        employees:        p.fullTimeEmployees || null,
+        website:          p.website  || '',
+        exchange:         pr.exchangeName || '',
+        marketCap:        pr.marketCap || sd.marketCap,
+        revenue:          fd.totalRevenue,
+        pe:               ks.trailingPE  || sd.trailingPE,
+        pb:               ks.priceToBook,
+        roe:              fd.returnOnEquity,
+        de:               fd.debtToEquity,
+        grossMargin:      fd.grossMargins,
+        currentRatio:     fd.currentRatio,
+        eps:              ks.trailingEps,
+        forwardPE:        ks.forwardPE,
+        dividendYield:    sd.dividendYield || sd.trailingAnnualDividendYield,
+        beta:             sd.beta || ks.beta,
+        fiftyTwoWeekHigh: sd.fiftyTwoWeekHigh,
+        fiftyTwoWeekLow:  sd.fiftyTwoWeekLow,
+        profitMargin:     fd.profitMargins,
+        revenueGrowth:    fd.revenueGrowth,
       };
-      console.log(`[profile] ${symbol} ok — pe:${profile.pe} sector:${profile.sector}`);
+      console.log(`[profile] ${symbol} ok — pe:${profile.pe} sector:${profile.sector} name:${profile.name}`);
       json(profile);
     } catch(e) {
-      console.error(`[profile] ${symbol} failed:`, e.message);
-      json({ symbol, name: symbol, description: '', sector: '', industry: '' });
+      console.error(`[profile] ${symbol} FAILED:`, e.message, e.stack?.split('\n')[1]);
+      json({ symbol, name: symbol, description: '', sector: '', industry: '', _error: e.message });
     }
     return;
   }
@@ -163,7 +179,7 @@ const server = http.createServer(async (req, res) => {
     json(results.slice(0, 10)); return;
   }
 
-  // /time_series?symbol=AAPL&start_date=2024-01-01&end_date=2024-12-31
+  // /time_series
   if (path === '/time_series') {
     const symbol = q.symbol || '';
     if (!symbol) { json({ values: [] }); return; }
@@ -223,4 +239,4 @@ wss.on('connection', clientWs => {
   clientWs.on('error', e => { console.error('WS cl:', e.message); upstream.close(); });
 });
 
-server.listen(PORT, () => console.log(`FinWise proxy v3.1 on :${PORT}`));
+server.listen(PORT, () => console.log(`FinWise proxy v3.2 on :${PORT}`));
