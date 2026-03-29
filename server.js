@@ -3,7 +3,7 @@ import https from 'https';
 import { parse } from 'url';
 import { WebSocketServer } from 'ws';
 import WebSocket from 'ws';
-import yf from 'yahoo-finance2';
+import * as yfModule from "yahoo-finance2";
 
 const PORT          = process.env.PORT           || 3001;
 const TD_KEY        = process.env.TD_KEY         || 'be5cb92f2c744ed98fd46f787a62088d';
@@ -12,7 +12,7 @@ const ALLOWED       = process.env.ALLOWED_ORIGIN || '*';
 
 // yahoo-finance2 v2 exports differently depending on bundler —
 // handle both named and default export patterns
-const yahooFinance = yf.default ?? yf;
+const yahooFinance = yfModule.default ?? yfModule;
 
 function cors(origin) {
   return {
@@ -65,7 +65,12 @@ const server = http.createServer(async (req, res) => {
   };
 
   if (path === '/health') {
-    json({ ok: true, version: '3.2', yfType: typeof yahooFinance, hasSummary: typeof yahooFinance.quoteSummary });
+    json({
+      ok: true, version: '3.3',
+      yfKeys: Object.keys(yfModule).slice(0, 8),
+      hasQuote: typeof yahooFinance.quote,
+      hasSummary: typeof yahooFinance.quoteSummary,
+    });
     return;
   }
 
