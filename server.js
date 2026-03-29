@@ -110,8 +110,29 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(data));
   };
 
-  // /health
-  if (path === '/health') { json({ ok: true, version: '4.0' }); return; }
+  // /debug — tests Yahoo Finance endpoints live
+  if (path === '/debug') {
+    const symbol = q.symbol || 'AAPL';
+    const results = {};
+    const endpoints = [
+      `https://query1.finance.yahoo.com/v11/finance/quoteSummary/${symbol}?modules=price`,
+      `https://query2.finance.yahoo.com/v11/finance/quoteSummary/${symbol}?modules=price`,
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=price`,
+      `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=price`,
+      `https://query1.finance.yahoo.com/v8/finance/quote?symbols=${symbol}`,
+      `https://query2.finance.yahoo.com/v8/finance/quote?symbols=${symbol}`,
+    ];
+    for (const url of endpoints) {
+      try {
+        const { status, body, raw } = await get(url);
+        const key = url.replace('https://','').slice(0,60);
+        results[key] = { status, hasResult: !!body?.quoteSummary?.result?.[0] || !!body?.quoteResponse?.result?.[0], snippet: raw || JSON.stringify(body).slice(0,120) };
+      } catch(e) {
+        results[url.slice(0,60)] = { error: e.message };
+      }
+    }
+    json(results); return;
+  }
 
   // /quote?symbol=AAPL,RELIANCE.NS
   if (path === '/quote') {
