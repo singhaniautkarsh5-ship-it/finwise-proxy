@@ -99,18 +99,20 @@ const server = http.createServer(async (req, res) => {
   if (path === '/debug-fmp') {
     const symbol = q.symbol || 'AAPL';
     const results = {};
-    const tests = [
-      `${FMP}/profile?symbol=${symbol}&apikey=${FMP_KEY}`,
-      `${FMP}/quote?symbol=${symbol}&apikey=${FMP_KEY}`,
-      `${FMP}/ratios-ttm?symbol=${symbol}&apikey=${FMP_KEY}`,
-      `${FMP}/key-metrics-ttm?symbol=${symbol}&apikey=${FMP_KEY}`,
-    ];
-    for (const url of tests) {
+    const tests = {
+      'profile':         `${FMP}/profile?symbol=${symbol}&apikey=${FMP_KEY}`,
+      'quote':           `${FMP}/quote?symbol=${symbol}&apikey=${FMP_KEY}`,
+      'ratios-ttm':      `${FMP}/ratios-ttm?symbol=${symbol}&apikey=${FMP_KEY}`,
+      'key-metrics-ttm': `${FMP}/key-metrics-ttm?symbol=${symbol}&apikey=${FMP_KEY}`,
+      'company-outlook': `${FMP}/company-outlook?symbol=${symbol}&apikey=${FMP_KEY}`,
+      'search':          `${FMP}/search?query=${symbol}&limit=3&apikey=${FMP_KEY}`,
+    };
+    for (const [key, url] of Object.entries(tests)) {
       try {
         const { status, body } = await get(url);
-        const key = url.split('/stable/')[1].split('?')[0];
-        results[key] = { status, isArray: Array.isArray(body), length: Array.isArray(body) ? body.length : null, snippet: JSON.stringify(body).slice(0, 200) };
-      } catch(e) { results[url] = { error: e.message }; }
+        const item = Array.isArray(body) ? body[0] : (body?.profile || body);
+        results[key] = { status, fields: item ? Object.keys(item) : [], snippet: JSON.stringify(item).slice(0, 300) };
+      } catch(e) { results[key] = { error: e.message }; }
     }
     json(results); return;
   }
