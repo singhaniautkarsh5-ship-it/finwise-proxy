@@ -8,6 +8,7 @@ const PORT          = process.env.PORT           || 3001;
 const TD_KEY        = process.env.TD_KEY         || 'be5cb92f2c744ed98fd46f787a62088d';
 const FMP_KEY       = process.env.FMP_KEY        || '0QaZFReu3rNLGWHlfuYwehPHOX99PfC0';
 const MARKETAUX_KEY = process.env.MARKETAUX_KEY  || '';
+const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY  || '';
 const ALLOWED       = process.env.ALLOWED_ORIGIN || '*';
 
 const FMP  = 'https://financialmodelingprep.com/stable';
@@ -283,6 +284,52 @@ const server = http.createServer(async (req, res) => {
       url = `https://api.marketaux.com/v1/news/all?filter_entities=true&language=en&limit=8&api_token=${MARKETAUX_KEY}`;
     try { const { body } = await get(url); json(body || { data: [] }); }
     catch(e) { json({ error: 'news failed' }, 502); }
+    return;
+  }
+
+  // /ai  — proxies Anthropic Claude API (keeps key server-side)
+  if (path === '/ai') {
+    if (!ANTHROPIC_KEY) { json({ error: 'ANTHROPIC_KEY not configured on server' }, 500); return; }
+    // Read POST body
+    let bodyStr = '';
+    try {
+      await new Promise((resolve, reject) => {
+        req.on('data', d => bodyStr += d);
+        req.on('end', resolve);
+        req.on('error', reject);
+      });
+    } catch(e) { json({ error: 'failed to read request body' }, 400); return; }
+
+    try {
+      const payload = JSON.parse(bodyStr);
+      // Forward to Anthropic
+      const response = await new Promise((resolve, reject) => {
+        const body = JSON.stringify(payload);
+        const r = https.request({
+          hostname: 'api.anthropic.com',
+          path:     '/v1/messages',
+          method:   'POST',
+          headers: {
+            'Content-Type':    'application/json',
+            'x-api-key':       ANTHROPIC_KEY,
+            'anthropic-version': '2023-06-01',
+            'Content-Length':  Buffer.byteLength(body),
+          },
+        }, res => {
+          let data = '';
+          res.on('data', d => data += d);
+          res.on('end', () => resolve({ status: res.statusCode, body: data }));
+        });
+        r.on('error', reject);
+        r.write(body);
+        r.end();
+      });
+      res.writeHead(response.status, { ...cors(origin), 'Content-Type': 'application/json' });
+      res.end(response.body);
+    } catch(e) {
+      console.error('AI proxy error:', e.message);
+      json({ error: 'AI request failed' }, 502);
+    }
     return;
   }
 
