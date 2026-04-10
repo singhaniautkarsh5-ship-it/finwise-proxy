@@ -7,7 +7,19 @@ import WebSocket from 'ws';
 const PORT          = process.env.PORT           || 3001;
 const TD_KEY        = process.env.TD_KEY         || 'be5cb92f2c744ed98fd46f787a62088d';
 const FMP_KEY       = process.env.FMP_KEY        || '0QaZFReu3rNLGWHlfuYwehPHOX99PfC0';
-const AV_KEY        = process.env.AV_KEY         || '7OLOGAUMV71P7X13';
+// Alpha Vantage — supports multiple keys, rotates to spread the 25 req/day limit per key
+const AV_KEYS = [
+  process.env.AV_KEY  || '7OLOGAUMV71P7X13',
+  process.env.AV_KEY2 || '',
+  process.env.AV_KEY3 || '',
+  process.env.AV_KEY4 || '',
+].filter(Boolean);
+let avKeyIndex = 0;
+function getAVKey() {
+  const key = AV_KEYS[avKeyIndex % AV_KEYS.length];
+  avKeyIndex++;
+  return key;
+}
 const MARKETAUX_KEY = process.env.MARKETAUX_KEY  || '';
 const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY  || '';
 const ALLOWED       = process.env.ALLOWED_ORIGIN || '*';
@@ -96,7 +108,7 @@ async function avQuote(symbols) {
   for (const sym of symbols) {
     try {
       const avSym = toAVSymbol(sym);
-      const { body } = await get(`${AV}?function=GLOBAL_QUOTE&symbol=${encodeURIComponent(avSym)}&apikey=${AV_KEY}`);
+      const { body } = await get(`${AV}?function=GLOBAL_QUOTE&symbol=${encodeURIComponent(avSym)}&apikey=${getAVKey()}`);
       const q = body?.['Global Quote'];
       if (!q || !parseFloat(q['05. price'])) continue;
       const price = parseFloat(q['05. price']);
@@ -317,15 +329,15 @@ const server = http.createServer(async (req, res) => {
     const type = q.type || 'company';
     let url;
     if (type === 'company' && q.symbols)
-      url = `https://api.marketaux.com/v1/news/all?symbols=${encodeURIComponent(q.symbols)}&filter_entities=true&language=en&limit=8&api_token=${MARKETAUX_KEY}`;
+      url = `https://api.marketaux.com/v1/news/all?symbols=${encodeURIComponent(q.symbols)}&language=en&limit=10&api_token=${MARKETAUX_KEY}`;
     else if (type === 'sector' && q.sector)
-      url = `https://api.marketaux.com/v1/news/all?industries=${encodeURIComponent(q.sector)}&filter_entities=true&language=en&limit=8&api_token=${MARKETAUX_KEY}`;
+      url = `https://api.marketaux.com/v1/news/all?industries=${encodeURIComponent(q.sector)}&filter_entities=true&language=en&limit=10&api_token=${MARKETAUX_KEY}`;
     else if (type === 'market' && q.country)
-      url = `https://api.marketaux.com/v1/news/all?countries=${encodeURIComponent(q.country)}&filter_entities=true&language=en&limit=8&api_token=${MARKETAUX_KEY}`;
+      url = `https://api.marketaux.com/v1/news/all?countries=${encodeURIComponent(q.country)}&language=en&limit=10&api_token=${MARKETAUX_KEY}`;
     else
-      url = `https://api.marketaux.com/v1/news/all?filter_entities=true&language=en&limit=8&api_token=${MARKETAUX_KEY}`;
+      url = `https://api.marketaux.com/v1/news/all?language=en&limit=10&api_token=${MARKETAUX_KEY}`;
     try { const { body } = await get(url); json(body || { data: [] }); }
-    catch(e) { json({ error: 'news failed' }, 502); }
+    catch(e) { json({ error: 'news failed: ' + e.message }, 502); }
     return;
   }
 
