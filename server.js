@@ -7,12 +7,14 @@ import WebSocket from 'ws';
 const PORT          = process.env.PORT           || 3001;
 const TD_KEY        = process.env.TD_KEY         || 'be5cb92f2c744ed98fd46f787a62088d';
 const FMP_KEY       = process.env.FMP_KEY        || '0QaZFReu3rNLGWHlfuYwehPHOX99PfC0';
+const AV_KEY        = process.env.AV_KEY         || '7OLOGAUMV71P7X13';
 const MARKETAUX_KEY = process.env.MARKETAUX_KEY  || '';
 const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY  || '';
 const ALLOWED       = process.env.ALLOWED_ORIGIN || '*';
 
 const FMP  = 'https://financialmodelingprep.com/stable';
 const TD   = 'https://api.twelvedata.com';
+const AV   = 'https://www.alphavantage.co/query';
 
 function cors(origin) {
   return {
@@ -80,6 +82,44 @@ async function tdQuote(symbols) {
   }));
 }
 
+// Alpha Vantage quote — Indian stocks (BSE/NSE)
+// AV uses RELIANCE.BSE format; we convert .NS/.BO to .BSE
+function toAVSymbol(sym) {
+  if (sym.endsWith('.NS')) return sym.replace('.NS', '.BSE');
+  if (sym.endsWith('.BO')) return sym.replace('.BO', '.BSE');
+  return sym;
+}
+
+async function avQuote(symbols) {
+  const results = [];
+  // AV free tier: one symbol at a time
+  for (const sym of symbols) {
+    try {
+      const avSym = toAVSymbol(sym);
+      const { body } = await get(`${AV}?function=GLOBAL_QUOTE&symbol=${encodeURIComponent(avSym)}&apikey=${AV_KEY}`);
+      const q = body?.['Global Quote'];
+      if (!q || !parseFloat(q['05. price'])) continue;
+      const price = parseFloat(q['05. price']);
+      const prevClose = parseFloat(q['08. previous close']);
+      const change = parseFloat(q['09. change']);
+      const changePct = parseFloat(q['10. change percent']?.replace('%',''));
+      results.push({
+        symbol: sym, // return original .NS/.BO symbol
+        price,
+        changesPercentage: changePct || 0,
+        change: change || 0,
+        open: parseFloat(q['02. open']) || price,
+        dayHigh: parseFloat(q['03. high']) || price,
+        dayLow: parseFloat(q['04. low']) || price,
+        previousClose: prevClose || price,
+        name: sym.replace('.NS','').replace('.BO',''),
+        exchange: sym.endsWith('.NS') ? 'NSE' : 'BSE',
+      });
+    } catch(e) { console.warn('AV quote error:', sym, e.message); }
+  }
+  return results;
+}
+
 const server = http.createServer(async (req, res) => {
   const origin = req.headers.origin;
   const parsed = parse(req.url, true);
@@ -94,7 +134,7 @@ const server = http.createServer(async (req, res) => {
   };
 
   // /health
-  if (path === '/health') { json({ ok: true, version: '5.0', apis: 'TD+FMP+Marketaux' }); return; }
+  if (path === '/health') { json({ ok: true, version: '5.1', apis: 'TD+FMP+AV+Marketaux' }); return; }
 
   // /debug-fmp — test FMP stable endpoints
   if (path === '/debug-fmp') {
@@ -123,7 +163,8 @@ const server = http.createServer(async (req, res) => {
     const symbols    = (q.symbol || '').split(',').map(s => s.trim()).filter(Boolean);
     if (!symbols.length) { json([]); return; }
     const usSyms     = symbols.filter(s => getMarket(s) === 'US');
-    const globalSyms = symbols.filter(s => getMarket(s) !== 'US');
+    const inSyms     = symbols.filter(s => getMarket(s) === 'IN');
+    const globalSyms = symbols.filter(s => getMarket(s) !== 'US' && getMarket(s) !== 'IN');
     const results    = [];
 
     // US → Twelve Data first, FMP fallback
@@ -142,18 +183,19 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // Global → FMP (supports many exchanges)
+    // Indian stocks → Alpha Vantage (free, BSE format)
+    if (inSyms.length) {
+      try {
+        const avResults = await avQuote(inSyms);
+        results.push(...avResults);
+      } catch(e) { console.warn('AV error:', e.message); }
+    }
+
+    // Other global → FMP
     if (globalSyms.length) {
       try {
         const fmpResults = await fmpQuote(globalSyms);
         results.push(...fmpResults);
-        // Any FMP missed → try TD
-        const fetched = new Set(fmpResults.map(r => r.symbol));
-        const missed  = globalSyms.filter(s => !fetched.has(s));
-        if (missed.length) {
-          const tdResults = await tdQuote(missed);
-          results.push(...tdResults);
-        }
       } catch(e) {}
     }
 
