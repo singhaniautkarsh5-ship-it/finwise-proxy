@@ -97,8 +97,8 @@ async function tdQuote(symbols) {
 // Alpha Vantage quote — Indian stocks (BSE/NSE)
 // AV uses RELIANCE.BSE format; we convert .NS/.BO to .BSE
 function toAVSymbol(sym) {
-  if (sym.endsWith('.NS')) return sym.replace('.NS', '.BSE');
-  if (sym.endsWith('.BO')) return sym.replace('.BO', '.BSE');
+  if (sym.endsWith('.NS')) return 'NSE:' + sym.replace('.NS', '');
+  if (sym.endsWith('.BO')) return 'BSE:' + sym.replace('.BO', '');
   return sym;
 }
 
